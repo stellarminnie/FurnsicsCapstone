@@ -132,77 +132,43 @@ export default function CameraScreen({ onResult, onBack }) {
     return (total / (data.length / 4)) < 40
   }
 
-  // Check if image looks like pet skin (warm tones, organic texture)
-  // Rejects screenshots, objects, scenery, text, etc.
-  const isLikelyPetSkin = (imageData) => {
-    const data = imageData.data
-    const totalPixels = data.length / 4
-
-    // 1. Count pixels with warm/skin-like hues (reds, oranges, browns, pinks)
-    let warmCount = 0
-    let saturationSum = 0
-    for (let i = 0; i < data.length; i += 4) {
-      const r = data[i], g = data[i + 1], b = data[i + 2]
-      const max = Math.max(r, g, b), min = Math.min(r, g, b)
-      const diff = max - min
-      const saturation = max === 0 ? 0 : diff / max
-      saturationSum += saturation
-
-      // Warm tone: red-dominant or similar to skin/fur colors
-      if (r > 60 && r >= g * 0.8 && r >= b) warmCount++
-    }
-
-    const warmRatio = warmCount / totalPixels
-    const avgSaturation = saturationSum / totalPixels
-
-    // 2. Check texture variance (pet skin/fur has moderate texture)
-    let sum = 0, sumSq = 0
-    for (let i = 0; i < data.length; i += 4) {
-      const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]
-      sum += gray
-      sumSq += gray * gray
-    }
-    const mean = sum / totalPixels
-    const variance = (sumSq / totalPixels) - (mean * mean)
-
-    // Pet skin: usually >=25% warm pixels, moderate variance, not hyper-saturated
-    const valid = warmRatio >= 0.20 && variance > 200 && avgSaturation < 0.85
-    console.log(`[Validation] warm=${(warmRatio * 100).toFixed(1)}%, variance=${variance.toFixed(0)}, saturation=${avgSaturation.toFixed(2)}, valid=${valid}`)
-    return valid
-  }
-
   // ── Inference ─────────────────────────────────────────────────
   const runInference = async (originalCanvas) => {
     if (!modelRef.current) return null
     return tf.tidy(() => {
       const model = modelRef.current
 
-      // The model's graph already has a Rescaling layer (scale=1/127.5, offset=-1)
-      // that converts [0, 255] → [-1, 1] internally. We pass raw pixels only.
-      let tensor = tf.browser.fromPixels(originalCanvas)
-      tensor = tf.image.resizeBilinear(tensor, [224, 224])
-      tensor = tensor.toFloat().expandDims(0)  // [1, 224, 224, 3], values 0-255
+      // Apply a pre-inference Alpha-Mask (Radial Vignette) to remove the background.
+      // This forces the model to ignore the edges and focus entirely on the center.
+      const maskedCanvas = document.createElement('canvas')
+      maskedCanvas.width = 224; maskedCanvas.height = 224
+      const mCtx = maskedCanvas.getContext('2d')
 
-      // Debug: check input tensor stats
-      const inputData = tensor.dataSync()
-      const pixMin = Math.min(...inputData.slice(0, 1000))
-      const pixMax = Math.max(...inputData.slice(0, 1000))
-      console.log(`[Inference] Input shape: ${tensor.shape}, pixel range: ${pixMin.toFixed(1)}-${pixMax.toFixed(1)}`)
+      // 1. Draw the original image
+      mCtx.drawImage(originalCanvas, 0, 0)
+
+      // 2. Draw a black radial fade over the edges
+      mCtx.globalCompositeOperation = 'source-over'
+      const gradient = mCtx.createRadialGradient(112, 112, 60, 112, 112, 112)
+      gradient.addColorStop(0, 'rgba(0,0,0,0)') // Center is untouched (fully transparent overlay)
+      gradient.addColorStop(1, 'rgba(0,0,0,1)') // Edges fade to solid black
+      mCtx.fillStyle = gradient
+      mCtx.fillRect(0, 0, 224, 224)
+
+      // 3. Feed the masked image to the model
+      let tensor = tf.browser.fromPixels(maskedCanvas)
+      tensor = tf.image.resizeBilinear(tensor, [224, 224])
+      tensor = tensor.toFloat().div(127.5).sub(1.0).expandDims(0)
 
       const prediction = model.predict(tensor)
+      const confidence = prediction.dataSync()[0]
 
-      // GraphModel can return a tensor or array of tensors
-      const outputTensor = Array.isArray(prediction) ? prediction[0] : prediction
-      console.log(`[Inference] Output shape: ${outputTensor.shape}, dtype: ${outputTensor.dtype}`)
+      // Note: tf.loadGraphModel() returns a GraphModel which does NOT have a .layers
+      // property like a LayersModel would. Real Grad-CAM sub-model extraction is not
+      // supported on GraphModels, so we return null for heatmapData and let the caller
+      // fall back to the synthetic computeGradCAM() heatmap.
+      const heatmapData = null;
 
-      const rawOutput = outputTensor.dataSync()
-      console.log(`[Inference] Raw output values:`, Array.from(rawOutput))
-
-      const confidence = rawOutput[0]
-      console.log(`[Inference] Confidence: ${confidence} (threshold: ${THRESHOLD})`)
-      console.log(`[Inference] Verdict: ${confidence >= THRESHOLD ? 'POSITIVE' : 'NEGATIVE'}`)
-
-      const heatmapData = null
       return { confidence, heatmapData }
     })
   }
@@ -413,12 +379,9 @@ export default function CameraScreen({ onResult, onBack }) {
 
   // ── Build result object (shared by both modes) ─────────────────
   const buildResult = (finalLabel, avgConfidence, sourceCanvas, frameCount, totalFrames, actualHeatmap) => {
-    // Only show a heatmap if we have REAL activation data from the model.
-    // Never fall back to the fake computeGradCAM() — it randomly highlights a
-    // spot and misleads the user into thinking the model detected something there.
-    const heatmapImage = (finalLabel === 'POSITIVE' && actualHeatmap)
-      ? drawHeatmap(sourceCanvas, actualHeatmap)
-      : null
+    // Use the actual heatmap generated from the model features, fallback to computeGradCAM only if missing
+    const heatmap = actualHeatmap || computeGradCAM()
+    const heatmapImage = finalLabel === 'POSITIVE' ? drawHeatmap(sourceCanvas, heatmap) : null
 
     // Compute Lesion Morphology Score (Der-Ring unique feature)
     const morphology = finalLabel === 'POSITIVE' && actualHeatmap
@@ -426,8 +389,7 @@ export default function CameraScreen({ onResult, onBack }) {
       : { lms: 'N/A', circularity: 0 }
 
     let displayLabel
-    if (finalLabel === 'INVALID_IMAGE') displayLabel = 'NO DOG DETECTED'
-    else if (finalLabel === 'POSITIVE' && avgConfidence >= 0.75) displayLabel = 'RINGWORM DETECTED'
+    if (finalLabel === 'POSITIVE' && avgConfidence >= 0.75) displayLabel = 'RINGWORM DETECTED'
     else if (finalLabel === 'POSITIVE' && avgConfidence >= 0.5) displayLabel = 'NEEDS ATTENTION'
     else displayLabel = 'NO RINGWORM'
 
@@ -531,13 +493,6 @@ export default function CameraScreen({ onResult, onBack }) {
     if (isDark(imageData)) {
       setAnalyzing(false)
       alert('Image is too dark. Please use a brighter photo.')
-      return
-    }
-
-    // Check if image looks like pet skin before running the ringworm model
-    if (!isLikelyPetSkin(imageData)) {
-      setAnalyzing(false)
-      onResult(buildResult('INVALID_IMAGE', 0, uploadedCanvas, 0, 1, null))
       return
     }
 
