@@ -5,12 +5,16 @@ export default function ResultScreen({ result, onScanAgain, onHome }) {
   const [peeking, setPeeking] = useState(false)
   
   const isPositive = result?.label === 'POSITIVE'
+  const isInvalid = result?.label === 'INVALID_IMAGE'
   const isAttention = result?.displayLabel === 'NEEDS ATTENTION'
   const confidence = Math.round((result?.confidence || 0) * 100)
 
   let actionText = 'Continue regular monitoring'
   let actionColor = '#1E8449'
-  if (result?.displayLabel === 'RINGWORM DETECTED') {
+  if (isInvalid) {
+    actionText = 'Upload a close-up photo of your dog\'s skin'
+    actionColor = '#2980B9'
+  } else if (result?.displayLabel === 'RINGWORM DETECTED') {
     actionText = 'Urgent veterinary referral required immediately'
     actionColor = '#C0392B'
   } else if (result?.displayLabel === 'NEEDS ATTENTION') {
@@ -18,9 +22,11 @@ export default function ResultScreen({ result, onScanAgain, onHome }) {
     actionColor = '#E67E22'
   }
 
-  const headerColor = isPositive
-    ? (isAttention ? 'var(--warning)' : 'var(--danger)')
-    : 'var(--success)'
+  const headerColor = isInvalid
+    ? '#2980B9'
+    : isPositive
+      ? (isAttention ? 'var(--warning)' : 'var(--danger)')
+      : 'var(--success)'
 
   // LMS color based on category
   const lmsColor = result?.lms === 'Classic Ring Pattern' ? '#C0392B'
@@ -39,17 +45,27 @@ export default function ResultScreen({ result, onScanAgain, onHome }) {
       {/* Header */}
       <div className="result-header">
         <div className="result-icon" style={{ color: headerColor }}>
+          {result?.displayLabel === 'NO DOG DETECTED' && '🐾'}
           {result?.displayLabel === 'RINGWORM DETECTED' && '⚠️'}
           {result?.displayLabel === 'NEEDS ATTENTION' && '🔶'}
           {result?.displayLabel === 'NO RINGWORM' && '✅'}
         </div>
         <h1 className="result-label" style={{ color: headerColor }}>{result?.displayLabel}</h1>
-        <p className="result-confidence">
-          AI Confidence: {confidence}%
-        </p>
-        <p className="result-votes">
-          {result?.positiveVotes}/{result?.totalFrames} frames flagged positive
-        </p>
+        {!isInvalid && (
+          <>
+            <p className="result-confidence">
+              AI Confidence: {confidence}%
+            </p>
+            <p className="result-votes">
+              {result?.positiveVotes}/{result?.totalFrames} frames flagged positive
+            </p>
+          </>
+        )}
+        {isInvalid && (
+          <p className="result-confidence" style={{ color: '#7f8c8d' }}>
+            The image does not appear to contain a dog's skin
+          </p>
+        )}
       </div>
 
       <div className="result-body">
@@ -107,13 +123,20 @@ export default function ResultScreen({ result, onScanAgain, onHome }) {
           <div className="section-title">Recommended Action</div>
           <div className="action-box" style={{ borderColor: actionColor }}>
             <p className="action-text">{actionText}</p>
+            {isInvalid && (
+              <p className="action-note">
+                Der-Ring is designed to analyze close-up photos of dog skin.
+                Please upload a clear, well-lit photo showing the affected
+                skin area (circular patch, hair loss, or reddened skin).
+              </p>
+            )}
             {isPositive && (
               <p className="action-note">
                 This is a preliminary screening result only.
                 A licensed veterinarian must confirm the diagnosis.
               </p>
             )}
-            {!isPositive && (
+            {!isPositive && !isInvalid && (
               <p className="action-note">
                 No ringworm indicators detected. Continue regular
                 monitoring and consult a vet if symptoms develop.

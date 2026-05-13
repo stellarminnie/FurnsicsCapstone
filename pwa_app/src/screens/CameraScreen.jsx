@@ -42,7 +42,7 @@ export default function CameraScreen({ onResult, onBack }) {
       setUploadedImage(null)
       setUploadedCanvas(null)
     }
-    return () => {}
+    return () => { }
   }, [mode])
 
   // Cleanup camera on unmount
@@ -59,7 +59,7 @@ export default function CameraScreen({ onResult, onBack }) {
       await tf.setBackend('wasm')
       await tf.ready()
       console.log('Backend:', tf.getBackend())
-      const model = await tf.loadLayersModel(MODEL_PATH)
+      const model = await tf.loadGraphModel(MODEL_PATH)
       modelRef.current = model
       setModelLoaded(true)
       console.log('✓ Model loaded successfully with WASM backend')
@@ -68,7 +68,7 @@ export default function CameraScreen({ onResult, onBack }) {
       try {
         await tf.setBackend('cpu')
         await tf.ready()
-        const model = await tf.loadLayersModel(MODEL_PATH)
+        const model = await tf.loadGraphModel(MODEL_PATH)
         modelRef.current = model
         setModelLoaded(true)
         console.log('✓ Model loaded with CPU fallback')
@@ -132,84 +132,77 @@ export default function CameraScreen({ onResult, onBack }) {
     return (total / (data.length / 4)) < 40
   }
 
+  // Check if image looks like pet skin (warm tones, organic texture)
+  // Rejects screenshots, objects, scenery, text, etc.
+  const isLikelyPetSkin = (imageData) => {
+    const data = imageData.data
+    const totalPixels = data.length / 4
+
+    // 1. Count pixels with warm/skin-like hues (reds, oranges, browns, pinks)
+    let warmCount = 0
+    let saturationSum = 0
+    for (let i = 0; i < data.length; i += 4) {
+      const r = data[i], g = data[i + 1], b = data[i + 2]
+      const max = Math.max(r, g, b), min = Math.min(r, g, b)
+      const diff = max - min
+      const saturation = max === 0 ? 0 : diff / max
+      saturationSum += saturation
+
+      // Warm tone: red-dominant or similar to skin/fur colors
+      if (r > 60 && r >= g * 0.8 && r >= b) warmCount++
+    }
+
+    const warmRatio = warmCount / totalPixels
+    const avgSaturation = saturationSum / totalPixels
+
+    // 2. Check texture variance (pet skin/fur has moderate texture)
+    let sum = 0, sumSq = 0
+    for (let i = 0; i < data.length; i += 4) {
+      const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]
+      sum += gray
+      sumSq += gray * gray
+    }
+    const mean = sum / totalPixels
+    const variance = (sumSq / totalPixels) - (mean * mean)
+
+    // Pet skin: usually >=25% warm pixels, moderate variance, not hyper-saturated
+    const valid = warmRatio >= 0.20 && variance > 200 && avgSaturation < 0.85
+    console.log(`[Validation] warm=${(warmRatio * 100).toFixed(1)}%, variance=${variance.toFixed(0)}, saturation=${avgSaturation.toFixed(2)}, valid=${valid}`)
+    return valid
+  }
+
   // ── Inference ─────────────────────────────────────────────────
   const runInference = async (originalCanvas) => {
     if (!modelRef.current) return null
     return tf.tidy(() => {
       const model = modelRef.current
-      
-      // Apply a pre-inference Alpha-Mask (Radial Vignette) to remove the background.
-      // This forces the model to ignore the edges and focus entirely on the center.
-      const maskedCanvas = document.createElement('canvas')
-      maskedCanvas.width = 224; maskedCanvas.height = 224
-      const mCtx = maskedCanvas.getContext('2d')
-      
-      // 1. Draw the original image
-      mCtx.drawImage(originalCanvas, 0, 0)
-      
-      // 2. Draw a black radial fade over the edges
-      mCtx.globalCompositeOperation = 'source-over'
-      const gradient = mCtx.createRadialGradient(112, 112, 60, 112, 112, 112)
-      gradient.addColorStop(0, 'rgba(0,0,0,0)') // Center is untouched (fully transparent overlay)
-      gradient.addColorStop(1, 'rgba(0,0,0,1)') // Edges fade to solid black
-      mCtx.fillStyle = gradient
-      mCtx.fillRect(0, 0, 224, 224)
 
-      // 3. Feed the masked image to the model
-      let tensor = tf.browser.fromPixels(maskedCanvas)
+      // The model's graph already has a Rescaling layer (scale=1/127.5, offset=-1)
+      // that converts [0, 255] → [-1, 1] internally. We pass raw pixels only.
+      let tensor = tf.browser.fromPixels(originalCanvas)
       tensor = tf.image.resizeBilinear(tensor, [224, 224])
-      tensor = tensor.toFloat().div(127.5).sub(1.0).expandDims(0)
-      
+      tensor = tensor.toFloat().expandDims(0)  // [1, 224, 224, 3], values 0-255
+
+      // Debug: check input tensor stats
+      const inputData = tensor.dataSync()
+      const pixMin = Math.min(...inputData.slice(0, 1000))
+      const pixMax = Math.max(...inputData.slice(0, 1000))
+      console.log(`[Inference] Input shape: ${tensor.shape}, pixel range: ${pixMin.toFixed(1)}-${pixMax.toFixed(1)}`)
+
       const prediction = model.predict(tensor)
-      const confidence = prediction.dataSync()[0]
 
-      // --- Generate Real Activation Map ---
-      // Find the last spatial convolutional layer to extract features from
-      let targetLayer;
-      for (let i = model.layers.length - 1; i >= 0; i--) {
-        const shape = model.layers[i].outputShape;
-        // We need a layer with spatial dimensions (e.g. [null, 7, 7, 1024])
-        if (Array.isArray(shape) && shape.length === 4 && shape[1] > 1 && shape[2] > 1) {
-            targetLayer = model.layers[i];
-            break;
-        }
-      }
-      
-      let heatmapData = null;
-      if (targetLayer) {
-        // Create a sub-model that outputs the feature maps
-        const camModel = tf.model({inputs: model.inputs, outputs: targetLayer.output});
-        const convOut = camModel.predict(tensor);
-        
-        // 1. Apply ReLU: True Grad-CAM only considers features that have a POSITIVE influence
-        // 2. Use a combination of Mean and Max to highlight focal points while keeping context
-        let hm = tf.relu(convOut).mean(-1).squeeze(); 
-        
-        // 3. Optional: Suppress edge artifacts (the 'red corners' issue) 
-        // by applying a subtle soft-mask towards the center
-        const [h, w] = hm.shape;
-        const maskData = new Float32Array(h * w);
-        for (let r = 0; r < h; r++) {
-          for (let c = 0; c < w; c++) {
-            const dy = (r / (Math.max(1, h - 1))) - 0.5;
-            const dx = (c / (Math.max(1, w - 1))) - 0.5;
-            maskData[r * w + c] = Math.exp(-(dx * dx + dy * dy) * 2.0);
-          }
-        }
-        const mask = tf.tensor2d(maskData, [h, w]);
-        hm = hm.mul(mask);
+      // GraphModel can return a tensor or array of tensors
+      const outputTensor = Array.isArray(prediction) ? prediction[0] : prediction
+      console.log(`[Inference] Output shape: ${outputTensor.shape}, dtype: ${outputTensor.dtype}`)
 
-        // Normalize the heatmap between 0 and 1
-        const max = hm.max();
-        const min = hm.min();
-        hm = hm.sub(min).div(max.sub(min).add(1e-7));
-        
-        // Resize back to 224x224 to match the image size
-        hm = hm.expandDims(2);
-        hm = tf.image.resizeBilinear(hm, [224, 224]).squeeze();
-        heatmapData = hm.dataSync(); // Returns Float32Array
-      }
+      const rawOutput = outputTensor.dataSync()
+      console.log(`[Inference] Raw output values:`, Array.from(rawOutput))
 
+      const confidence = rawOutput[0]
+      console.log(`[Inference] Confidence: ${confidence} (threshold: ${THRESHOLD})`)
+      console.log(`[Inference] Verdict: ${confidence >= THRESHOLD ? 'POSITIVE' : 'NEGATIVE'}`)
+
+      const heatmapData = null
       return { confidence, heatmapData }
     })
   }
@@ -236,8 +229,8 @@ export default function CameraScreen({ onResult, onBack }) {
     try {
       const inferenceResult = await runInference(canvas)
       if (inferenceResult === null) return null
-      return { 
-        label: inferenceResult.confidence >= THRESHOLD ? 'POSITIVE' : 'NEGATIVE', 
+      return {
+        label: inferenceResult.confidence >= THRESHOLD ? 'POSITIVE' : 'NEGATIVE',
         confidence: inferenceResult.confidence,
         heatmapData: inferenceResult.heatmapData
       }
@@ -268,7 +261,7 @@ export default function CameraScreen({ onResult, onBack }) {
   const drawHeatmap = (sourceCanvas, rawHeatmap) => {
     const width = 224;
     const height = 224;
-    
+
     // Apply a Gaussian blur to the heatmap for smooth, MRI-like professional transitions
     const radius = 15;
     const sigma = radius / 3;
@@ -293,7 +286,7 @@ export default function CameraScreen({ onResult, onBack }) {
         temp[y * width + x] = val;
       }
     }
-    
+
     const heatmap = new Float32Array(width * height);
     let minVal = Infinity;
     let maxVal = -Infinity;
@@ -348,19 +341,19 @@ export default function CameraScreen({ onResult, onBack }) {
       let val = heatmap[i];
       const p = i * 4;
       const [r, g, b] = getJetColor(val);
-      
+
       // Convert original pixel to grayscale so the heatmap colors pop exactly like an MRI
       const origR = data[p];
       const origG = data[p + 1];
       const origB = data[p + 2];
       const gray = 0.299 * origR + 0.587 * origG + 0.114 * origB;
-      
+
       // Adjust alpha blending: 'hot' areas (red/orange) are more opaque (0.9), 
       // while the background retains a prominent blue tint (0.5) over the grayscale image.
-      const alpha = 0.5 + (val * 0.4); 
+      const alpha = 0.5 + (val * 0.4);
       const invAlpha = 1 - alpha;
 
-      data[p]     = Math.round(gray * invAlpha + r * alpha);
+      data[p] = Math.round(gray * invAlpha + r * alpha);
       data[p + 1] = Math.round(gray * invAlpha + g * alpha);
       data[p + 2] = Math.round(gray * invAlpha + b * alpha);
     }
@@ -411,18 +404,21 @@ export default function CameraScreen({ onResult, onBack }) {
 
     // Step 5 — Classify LMS category
     let lms
-    if (circularity >= 0.75)       lms = 'Classic Ring Pattern'
-    else if (circularity >= 0.40)  lms = 'Partial Ring Pattern'
-    else                            lms = 'Atypical Pattern'
+    if (circularity >= 0.75) lms = 'Classic Ring Pattern'
+    else if (circularity >= 0.40) lms = 'Partial Ring Pattern'
+    else lms = 'Atypical Pattern'
 
     return { lms, circularity: Math.round(circularity * 100) / 100 }
   }
 
   // ── Build result object (shared by both modes) ─────────────────
   const buildResult = (finalLabel, avgConfidence, sourceCanvas, frameCount, totalFrames, actualHeatmap) => {
-    // Use the actual heatmap generated from the model features, fallback to computeGradCAM only if missing
-    const heatmap = actualHeatmap || computeGradCAM()
-    const heatmapImage = finalLabel === 'POSITIVE' ? drawHeatmap(sourceCanvas, heatmap) : null
+    // Only show a heatmap if we have REAL activation data from the model.
+    // Never fall back to the fake computeGradCAM() — it randomly highlights a
+    // spot and misleads the user into thinking the model detected something there.
+    const heatmapImage = (finalLabel === 'POSITIVE' && actualHeatmap)
+      ? drawHeatmap(sourceCanvas, actualHeatmap)
+      : null
 
     // Compute Lesion Morphology Score (Der-Ring unique feature)
     const morphology = finalLabel === 'POSITIVE' && actualHeatmap
@@ -430,17 +426,18 @@ export default function CameraScreen({ onResult, onBack }) {
       : { lms: 'N/A', circularity: 0 }
 
     let displayLabel
-    if (finalLabel === 'POSITIVE' && avgConfidence >= 0.75) displayLabel = 'RINGWORM DETECTED'
-    else if (finalLabel === 'POSITIVE' && avgConfidence >= 0.5)  displayLabel = 'NEEDS ATTENTION'
-    else                                                          displayLabel = 'NO RINGWORM'
+    if (finalLabel === 'INVALID_IMAGE') displayLabel = 'NO DOG DETECTED'
+    else if (finalLabel === 'POSITIVE' && avgConfidence >= 0.75) displayLabel = 'RINGWORM DETECTED'
+    else if (finalLabel === 'POSITIVE' && avgConfidence >= 0.5) displayLabel = 'NEEDS ATTENTION'
+    else displayLabel = 'NO RINGWORM'
 
-    return { 
-      label: finalLabel, 
-      displayLabel, 
-      confidence: avgConfidence, 
-      heatmapImage, 
+    return {
+      label: finalLabel,
+      displayLabel,
+      confidence: avgConfidence,
+      heatmapImage,
       rawImage: sourceCanvas.toDataURL('image/jpeg', 0.95),
-      positiveVotes: frameCount, 
+      positiveVotes: frameCount,
       totalFrames,
       lms: morphology.lms,
       circularity: morphology.circularity
@@ -490,10 +487,10 @@ export default function CameraScreen({ onResult, onBack }) {
 
     setCapturing(false)
     stopCamera()
-    
+
     // Find the last frame that contributed to the positive result to show its heatmap
     const lastPositiveResult = results.slice().reverse().find(r => r.label === 'POSITIVE') || results[results.length - 1]
-    
+
     onResult(buildResult(finalLabel, avgConfidence, lastCanvas, positiveVotes, results.length, lastPositiveResult?.heatmapData))
   }
 
@@ -534,6 +531,13 @@ export default function CameraScreen({ onResult, onBack }) {
     if (isDark(imageData)) {
       setAnalyzing(false)
       alert('Image is too dark. Please use a brighter photo.')
+      return
+    }
+
+    // Check if image looks like pet skin before running the ringworm model
+    if (!isLikelyPetSkin(imageData)) {
+      setAnalyzing(false)
+      onResult(buildResult('INVALID_IMAGE', 0, uploadedCanvas, 0, 1, null))
       return
     }
 
