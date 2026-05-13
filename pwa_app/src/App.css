@@ -1,0 +1,151 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Space+Grotesk:wght@600;700&display=swap');
+
+/* ─── Design Tokens ─────────────────────────────────────────── */
+:root {
+  /* Palette */
+  --ink: #0D1A1B;
+  --ink-2: #4A6366;
+  --ink-3: #8EA5A7;
+  --surface: #FFFFFF;
+  --bg: #F4F7F7;
+  --line: #E2EAEA;
+
+  --teal: #0B6E72;
+  --teal-hover: #0A5F63;
+  --teal-muted: rgba(11, 110, 114, 0.10);
+
+  --danger: #B0281E;
+  --danger-bg: #FEF2F1;
+  --success: #1A7A40;
+  --success-bg: #EEFAF4;
+
+  /* Typography */
+  --font-body: 'Inter', system-ui, sans-serif;
+  --font-head: 'Space Grotesk', system-ui, sans-serif;
+
+  --text-xs: 11px;
+  --text-sm: 13px;
+  --text-base: 15px;
+  --text-md: 17px;
+  --text-lg: 22px;
+  --text-xl: 32px;
+  --text-2xl: 44px;
+
+  /* Spacing */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  /* Radius */
+  --radius-sm: 6px;
+  --radius-md: 12px;
+  --radius-lg: 20px;
+  --radius-full: 999px;
+
+  /* Shadow */
+  --shadow-sm: 0 1px 4px rgba(0, 0, 0, 0.06);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.08);
+}
+
+/* ─── Reset ─────────────────────────────────────────────────── */
+*,
+*::before,
+*::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  font-family: var(--font-body);
+  color: var(--ink);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ─── App Shell ──────────────────────────────────────────────── */
+.app-root {
+  height: 100%;
+  width: 100%;
+  max-width: 430px;
+  margin: 0 auto;
+  background: var(--bg);
+  position: relative;
+  overflow: hidden;
+}
+
+/* ─── Screen wrapper ─────────────────────────────────────────── */
+.screen {
+  height: 100%;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+/* ─── Buttons ────────────────────────────────────────────────── */
+button {
+  cursor: pointer;
+  font-family: var(--font-body);
+  border: none;
+  outline: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.btn-primary {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  padding: var(--space-4) var(--space-6);
+  background: var(--teal);
+  color: #fff;
+  border-radius: var(--radius-full);
+  font-size: var(--text-base);
+  font-weight: 600;
+  font-family: var(--font-body);
+  letter-spacing: 0.01em;
+  transition: background 0.15s ease, transform 0.1s ease;
+}
+
+.btn-primary:active {
+  transform: scale(0.98);
+  background: var(--teal-hover);
+}
+
+.btn-primary:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.btn-secondary {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  padding: calc(var(--space-4) - 1px) var(--space-6);
+  background: transparent;
+  color: var(--teal);
+  border-radius: var(--radius-full);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  font-family: var(--font-body);
+  border: 1.5px solid var(--line);
+  transition: border-color 0.15s ease, transform 0.1s ease;
+}
+
+.btn-secondary:active {
+  transform: scale(0.98);
+  border-color: var(--teal);
+}

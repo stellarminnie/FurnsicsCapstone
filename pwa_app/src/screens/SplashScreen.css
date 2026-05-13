@@ -1,0 +1,124 @@
+/* ─── Splash Screen ──────────────────────────────────────────── */
+.splash {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  opacity: 0;
+  transform: translateY(10px);
+  transition: opacity 0.4s ease, transform 0.4s ease;
+}
+
+.splash.ready {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* Top status tag */
+.splash-top {
+  padding: 52px var(--space-6) 0;
+  display: flex;
+  justify-content: center;
+}
+
+.splash-badge {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  color: var(--teal);
+  background: var(--teal-muted);
+  padding: 5px 14px;
+  border-radius: var(--radius-full);
+}
+
+/* Hero */
+.splash-hero {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-6);
+  text-align: center;
+  gap: var(--space-2);
+}
+
+.logo-mark {
+  width: 72px;
+  height: 72px;
+  border-radius: var(--radius-lg);
+  background: var(--teal);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: var(--space-5);
+}
+
+.splash-title {
+  font-family: var(--font-head);
+  font-size: var(--text-2xl);
+  font-weight: 700;
+  color: var(--ink);
+  letter-radius: -0.02em;
+  line-height: 1;
+}
+
+.splash-sub {
+  font-size: var(--text-base);
+  color: var(--ink-2);
+  font-weight: 400;
+}
+
+/* Feature list */
+.splash-features {
+  padding: 0 var(--space-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.feature-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: var(--bg);
+  border-radius: var(--radius-md);
+}
+
+.feature-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--teal);
+  flex-shrink: 0;
+}
+
+.feature-label {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.feature-desc {
+  font-size: var(--text-xs);
+  color: var(--ink-3);
+  margin-top: 1px;
+}
+
+/* Footer */
+.splash-footer {
+  padding: var(--space-6) var(--space-6) 40px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.splash-disclaimer {
+  font-size: var(--text-xs);
+  color: var(--ink-3);
+  text-align: center;
+}
