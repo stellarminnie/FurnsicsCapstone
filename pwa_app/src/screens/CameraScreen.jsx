@@ -135,42 +135,76 @@ export default function CameraScreen({ onResult, onBack }) {
   // ── Inference ─────────────────────────────────────────────────
   const runInference = async (originalCanvas) => {
     if (!modelRef.current) return null
-    return tf.tidy(() => {
-      const model = modelRef.current
+    const model = modelRef.current
 
-      // Apply a pre-inference Alpha-Mask (Radial Vignette) to remove the background.
-      // This forces the model to ignore the edges and focus entirely on the center.
-      const maskedCanvas = document.createElement('canvas')
-      maskedCanvas.width = 224; maskedCanvas.height = 224
-      const mCtx = maskedCanvas.getContext('2d')
+    // Apply a pre-inference radial vignette mask — forces the model
+    // to focus on the centre and ignore peripheral background noise.
+    const maskedCanvas = document.createElement('canvas')
+    maskedCanvas.width = 224; maskedCanvas.height = 224
+    const mCtx = maskedCanvas.getContext('2d')
+    mCtx.drawImage(originalCanvas, 0, 0)
+    mCtx.globalCompositeOperation = 'source-over'
+    const grad = mCtx.createRadialGradient(112, 112, 60, 112, 112, 112)
+    grad.addColorStop(0, 'rgba(0,0,0,0)')
+    grad.addColorStop(1, 'rgba(0,0,0,1)')
+    mCtx.fillStyle = grad
+    mCtx.fillRect(0, 0, 224, 224)
 
-      // 1. Draw the original image
-      mCtx.drawImage(originalCanvas, 0, 0)
-
-      // 2. Draw a black radial fade over the edges
-      mCtx.globalCompositeOperation = 'source-over'
-      const gradient = mCtx.createRadialGradient(112, 112, 60, 112, 112, 112)
-      gradient.addColorStop(0, 'rgba(0,0,0,0)') // Center is untouched (fully transparent overlay)
-      gradient.addColorStop(1, 'rgba(0,0,0,1)') // Edges fade to solid black
-      mCtx.fillStyle = gradient
-      mCtx.fillRect(0, 0, 224, 224)
-
-      // 3. Feed the masked image to the model
-      let tensor = tf.browser.fromPixels(maskedCanvas)
-      tensor = tf.image.resizeBilinear(tensor, [224, 224])
-      tensor = tensor.toFloat().div(127.5).sub(1.0).expandDims(0)
-
-      const prediction = model.predict(tensor)
-      const confidence = prediction.dataSync()[0]
-
-      // Note: tf.loadGraphModel() returns a GraphModel which does NOT have a .layers
-      // property like a LayersModel would. Real Grad-CAM sub-model extraction is not
-      // supported on GraphModels, so we return null for heatmapData and let the caller
-      // fall back to the synthetic computeGradCAM() heatmap.
-      const heatmapData = null;
-
-      return { confidence, heatmapData }
+    // Build the input tensor (kept alive outside tidy so grad can use it)
+    const inputTensor = tf.tidy(() => {
+      let t = tf.browser.fromPixels(maskedCanvas)
+      t = tf.image.resizeBilinear(t, [224, 224])
+      return t.toFloat().div(127.5).sub(1.0).expandDims(0)
     })
+
+    // Forward pass — get confidence score
+    const predTensor = model.predict(inputTensor)
+    const confidence = predTensor.dataSync()[0]
+    predTensor.dispose()
+
+    // ── Gradient Saliency Map ──────────────────────────────────────
+    // Compute d(output)/d(input) — pixels with large gradient magnitude
+    // had the most influence on the prediction, so they form the real
+    // lesion mask rather than the synthetic circle fallback.
+    let heatmapData = null
+    try {
+      const gradFn = tf.grad((x) => model.predict(x).squeeze())
+      const saliency = gradFn(inputTensor)           // shape [1, 224, 224, 3]
+
+      heatmapData = tf.tidy(() => {
+        // Absolute gradient, max across RGB channels → [224, 224]
+        let hm = saliency.abs().squeeze().max(-1)
+
+        // Apply a gentle centre-bias to suppress boundary noise
+        const [h, w] = [224, 224]
+        const biasData = new Float32Array(h * w)
+        for (let r = 0; r < h; r++) {
+          for (let c = 0; c < w; c++) {
+            const dy = (r / (h - 1)) - 0.5
+            const dx = (c / (w - 1)) - 0.5
+            biasData[r * w + c] = Math.exp(-(dx * dx + dy * dy) * 3.0)
+          }
+        }
+        hm = hm.mul(tf.tensor2d(biasData, [h, w]))
+
+        // Normalise [0, 1]
+        const minV = hm.min()
+        const maxV = hm.max()
+        hm = hm.sub(minV).div(maxV.sub(minV).add(1e-7))
+        return hm.dataSync()           // Float32Array
+      })
+
+      saliency.dispose()
+      console.log('✓ Gradient saliency computed')
+    } catch (e) {
+      // GraphModel may not support tf.grad in all TF.js versions;
+      // fall back to image-content saliency (colour-based lesion detector)
+      console.warn('Gradient saliency failed, using colour saliency:', e.message)
+      heatmapData = computeColorSaliency(originalCanvas)
+    }
+
+    inputTensor.dispose()
+    return { confidence, heatmapData }
   }
 
   // ── Camera: capture one frame from video ───────────────────────
@@ -206,22 +240,58 @@ export default function CameraScreen({ onResult, onBack }) {
     }
   }
 
-  // ── Heatmap ────────────────────────────────────────────────────
-  const computeGradCAM = () => {
-    const width = 224, height = 224
-    const heatmap = new Float32Array(width * height)
-    const cx = width / 2 + (Math.random() - 0.5) * 60
-    const cy = height / 2 + (Math.random() - 0.5) * 60
-    const sigma = 50 + Math.random() * 30
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        const dx = x - cx, dy = y - cy
-        heatmap[y * width + x] = Math.exp(-(dx * dx + dy * dy) / (2 * sigma * sigma))
+  // ── Colour-Content Saliency (real lesion detector) ────────────────
+  // Analyses each pixel for the visual signatures of ringworm skin lesions:
+  //   • High colour saturation  (inflamed skin is vivid vs dull fur)
+  //   • Redness / pinkness      (erythema — hallmark of ringworm)
+  //   • Mid-brightness only     (suppress shadows and specular highlights)
+  // A gentle centre-bias is then applied because users centre the lesion.
+  // This produces an irregularly-shaped heatmap that matches the real lesion
+  // instead of the previous perfect synthetic circle.
+  const computeColorSaliency = (canvas) => {
+    const ctx = canvas.getContext('2d')
+    const { data } = ctx.getImageData(0, 0, 224, 224)
+    const W = 224, H = 224
+    const raw = new Float32Array(W * H)
+
+    for (let i = 0; i < W * H; i++) {
+      const r = data[i * 4]
+      const g = data[i * 4 + 1]
+      const b = data[i * 4 + 2]
+
+      const maxC = Math.max(r, g, b)
+      const minC = Math.min(r, g, b)
+
+      // Saturation [0–1] — how vivid the pixel is
+      const sat = maxC > 0 ? (maxC - minC) / maxC : 0
+
+      // Redness [0–1] — red dominance over green+blue average
+      const redness = maxC > 10 ? Math.max(0, (r * 2 - g - b) / (maxC * 2)) : 0
+
+      // Brightness [0–1]
+      const bright = (r + g + b) / 765
+
+      // Suppress very dark (shadow) and very bright (specular highlight) pixels
+      const brightMask = Math.min(1, bright * 5) * Math.min(1, (1 - bright) * 5)
+
+      raw[i] = (sat * 0.55 + redness * 0.45) * brightMask
+    }
+
+    // Gentle centre-bias: lesion is expected near the image centre
+    for (let row = 0; row < H; row++) {
+      for (let col = 0; col < W; col++) {
+        const dy = (row / (H - 1)) - 0.5
+        const dx = (col / (W - 1)) - 0.5
+        raw[row * W + col] *= Math.exp(-(dx * dx + dy * dy) * 2.5)
       }
     }
-    const max = Math.max(...heatmap)
-    for (let i = 0; i < heatmap.length; i++) heatmap[i] /= max
-    return heatmap
+
+    // Normalise [0, 1]
+    let maxVal = 0
+    for (let i = 0; i < raw.length; i++) if (raw[i] > maxVal) maxVal = raw[i]
+    if (maxVal > 0) for (let i = 0; i < raw.length; i++) raw[i] /= maxVal
+
+    return raw
   }
 
   const drawHeatmap = (sourceCanvas, rawHeatmap) => {
@@ -379,8 +449,9 @@ export default function CameraScreen({ onResult, onBack }) {
 
   // ── Build result object (shared by both modes) ─────────────────
   const buildResult = (finalLabel, avgConfidence, sourceCanvas, frameCount, totalFrames, actualHeatmap) => {
-    // Use the actual heatmap generated from the model features, fallback to computeGradCAM only if missing
-    const heatmap = actualHeatmap || computeGradCAM()
+    // Use actual heatmap from gradient saliency; fall back to colour-content
+    // saliency derived from the source image — never a synthetic circle.
+    const heatmap = actualHeatmap || computeColorSaliency(sourceCanvas)
     const heatmapImage = finalLabel === 'POSITIVE' ? drawHeatmap(sourceCanvas, heatmap) : null
 
     // Compute Lesion Morphology Score (Der-Ring unique feature)
